@@ -7,7 +7,7 @@ local LocalPlayer = Players.LocalPlayer
 local Networking = require(ReplicatedStorage:WaitForChild("SharedModules"):WaitForChild("Networking"))
 local Gardens = workspace:WaitForChild("Gardens")
 
-local TARGET_OWNER_NAME = { "quut16pkbn34", "Honlnwzag2g", "Honlnwzag2g" }
+local TARGET_OWNER_NAME = { "quut16pkbn34", "Honlnwzag2g", "Justnow0122" }
 local TARGET_PLANT_NAME = "Dragon's Breath"
 local SPRINKLER_NAME = "Super Sprinkler"
 local WATERING_CAN_NAME = "Super Watering Can"
