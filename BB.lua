@@ -2,7 +2,6 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
 local TeleportService = game:GetService("TeleportService")
-local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
 local Networking = require(ReplicatedStorage:WaitForChild("SharedModules"):WaitForChild("Networking"))
@@ -19,9 +18,11 @@ local TOOL_WAIT_TIMEOUT = 8
 local CHARACTER_WAIT_TIMEOUT = 15
 local RESPAWN_GRACE_SECONDS = 5
 local RESPAWN_STAND_WAIT_SECONDS = 115
-local TWEEN_REACHED_DISTANCE = 8
-local TWEEN_MAX_SECONDS_PER_MOVE = 45
-local PLACE_OFFSET_DISTANCE = 3
+local WALK_REACHED_DISTANCE = 2
+local WALK_MAX_SECONDS_PER_MOVE = 45
+local WALK_OFFSET_DISTANCE = 0.5
+local WALK_REFRESH_SECONDS = 0.6
+local PLACE_OFFSET_DISTANCE = 1.5
 local LOG_PREFIX = "[QuutDragonBreathSuperLoop]"
 
 if _G.QuutDragonBreathSuperLoop then
@@ -546,11 +547,12 @@ local function resolveTarget(plot)
 	end
 
 	local nearPosition = projectToPlantArea(plot, plantPosition + (direction * PLACE_OFFSET_DISTANCE)) or placePosition
+	local walkPosition = projectToPlantArea(plot, nearPosition + (direction * WALK_OFFSET_DISTANCE)) or nearPosition
 
 	State.TargetPlot = plot
 	State.TargetPlant = plant
 	State.TargetPosition = nearPosition
-	State.WalkPosition = nearPosition + (direction * 5)
+	State.WalkPosition = walkPosition
 
 	log(
 		("target ready | plot=%s | plant=%s | place=%.2f, %.2f, %.2f"):format(
@@ -565,7 +567,7 @@ local function resolveTarget(plot)
 	return true
 end
 
-local function getTweenTargetPosition()
+local function getWalkTargetPosition()
 	return State.WalkPosition or State.TargetPosition
 end
 
@@ -578,27 +580,15 @@ local function horizontalDistance(a, b)
 end
 
 local function isNearTarget(root)
-	local target = getTweenTargetPosition()
-	return root and target and horizontalDistance(root.Position, target) <= TWEEN_REACHED_DISTANCE
+	local target = getWalkTargetPosition()
+	return root and target and horizontalDistance(root.Position, target) <= WALK_REACHED_DISTANCE
 end
 
-local function getRootTweenPosition(root, humanoid, groundPosition)
-	local heightOffset = 3
-	if humanoid then
-		heightOffset = math.max(heightOffset, tonumber(humanoid.HipHeight) or 0)
-	end
-	if root then
-		heightOffset = math.max(heightOffset, (root.Size.Y * 0.5) + 1)
-	end
-
-	return Vector3.new(groundPosition.X, groundPosition.Y + heightOffset, groundPosition.Z)
-end
-
-local function tweenToTarget()
+local function walkToTarget()
 	local character = getCharacter(CHARACTER_WAIT_TIMEOUT)
 	local humanoid = getHumanoid(character, CHARACTER_WAIT_TIMEOUT)
 	local root = getRootPart(character, CHARACTER_WAIT_TIMEOUT)
-	local target = getTweenTargetPosition()
+	local target = getWalkTargetPosition()
 
 	if not (humanoid and root and target) then
 		return false, "character not ready"
@@ -614,42 +604,60 @@ local function tweenToTarget()
 		return true
 	end
 
-	local rootTarget = getRootTweenPosition(root, humanoid, target)
 	local distance = horizontalDistance(root.Position, target)
 	local speed = math.max(tonumber(humanoid.WalkSpeed) or 16, 1)
-	local duration = math.clamp(distance / speed, 0.05, TWEEN_MAX_SECONDS_PER_MOVE)
-	local lookVector = root.CFrame.LookVector
-	local flatLookVector = Vector3.new(lookVector.X, 0, lookVector.Z)
-	if flatLookVector.Magnitude < 0.05 then
-		flatLookVector = Vector3.new(0, 0, -1)
-	end
-	local targetCFrame = CFrame.new(rootTarget, rootTarget + flatLookVector.Unit)
-	local tween = TweenService:Create(
-		root,
-		TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut),
-		{ CFrame = targetCFrame }
-	)
-
-	tween:Play()
-
+	local timeout = math.clamp((distance / speed) + 5, 3, WALK_MAX_SECONDS_PER_MOVE)
 	local startedAt = os.clock()
-	while State.Running and token == State.ResetToken and os.clock() - startedAt <= duration + 0.5 do
+	local nextMoveAt = 0
+	local moveFinished = false
+	local moveReached = false
+	local moveConnection
+
+	pcall(function()
+		humanoid.AutoRotate = true
+	end)
+
+	moveConnection = humanoid.MoveToFinished:Connect(function(reached)
+		moveFinished = true
+		moveReached = reached == true
+	end)
+
+	local function cleanup()
+		if moveConnection then
+			moveConnection:Disconnect()
+			moveConnection = nil
+		end
+	end
+
+	while State.Running and token == State.ResetToken and os.clock() - startedAt <= timeout do
 		if humanoid.Health <= 0 then
-			tween:Cancel()
+			cleanup()
 			resetLogic("health zero")
 			return false, "character dead"
 		end
 
 		if isNearTarget(root) then
-			tween:Cancel()
+			cleanup()
 			return true
+		end
+
+		if moveFinished and moveReached and isNearTarget(root) then
+			cleanup()
+			return true
+		end
+
+		if os.clock() >= nextMoveAt then
+			moveFinished = false
+			moveReached = false
+			humanoid:MoveTo(target)
+			nextMoveAt = os.clock() + WALK_REFRESH_SECONDS
 		end
 
 		task.wait(0.05)
 	end
 
-	tween:Cancel()
-	return isNearTarget(root), "tween timeout"
+	cleanup()
+	return isNearTarget(root), "walk timeout"
 end
 
 local function sprinklersFolder(plot)
@@ -713,9 +721,9 @@ local function ensureSprinkler(plot)
 		return true
 	end
 
-	local tweened, tweenMessage = tweenToTarget()
-	if not tweened then
-		return false, tweenMessage
+	local walked, walkMessage = walkToTarget()
+	if not walked then
+		return false, walkMessage
 	end
 
 	return placeSprinkler(plot)
@@ -774,9 +782,9 @@ local function waitWithSprinklerMaintenance(plot, seconds)
 		local humanoid = getHumanoid(character, 0)
 		local root = getRootPart(character, 0)
 		if humanoid and root and humanoid.Health > 0 and not isNearTarget(root) then
-			local tweened, message = tweenToTarget()
-			if not tweened then
-				setStatus(message or "tween failed")
+			local walked, message = walkToTarget()
+			if not walked then
+				setStatus(message or "walk failed")
 			end
 		elseif humanoid and humanoid.Health <= 0 then
 			resetLogic("health zero")
@@ -853,9 +861,9 @@ task.spawn(function()
 			continue
 		end
 
-		local tweened, tweenMessage = tweenToTarget()
-		if not tweened then
-			setStatus(tweenMessage or "tween failed")
+		local walked, walkMessage = walkToTarget()
+		if not walked then
+			setStatus(walkMessage or "walk failed")
 			task.wait(2)
 			continue
 		end
