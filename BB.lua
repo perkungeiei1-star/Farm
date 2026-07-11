@@ -2,12 +2,13 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
 local TeleportService = game:GetService("TeleportService")
+local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
 local Networking = require(ReplicatedStorage:WaitForChild("SharedModules"):WaitForChild("Networking"))
 local Gardens = workspace:WaitForChild("Gardens")
 
-local TARGET_OWNER_NAME = { "quut16pkbn34", "Honlnwzag2g", "Justnow0122" }
+local TARGET_OWNER_NAME = { "quut16pkbn34", "Honlnwzag2g", "Honlnwzag2g" }
 local TARGET_PLANT_NAME = "Dragon's Breath"
 local SPRINKLER_NAME = "Super Sprinkler"
 local WATERING_CAN_NAME = "Super Watering Can"
@@ -18,10 +19,9 @@ local TOOL_WAIT_TIMEOUT = 8
 local CHARACTER_WAIT_TIMEOUT = 15
 local RESPAWN_GRACE_SECONDS = 5
 local RESPAWN_STAND_WAIT_SECONDS = 115
-local WALK_REACHED_DISTANCE = 2
-local WALK_MAX_SECONDS_PER_MOVE = 45
-local WALK_OFFSET_DISTANCE = 0.9
-local WALK_REFRESH_SECONDS = 0.6
+local TWEEN_REACHED_DISTANCE = 2
+local TWEEN_MAX_SECONDS_PER_MOVE = 45
+local TWEEN_OFFSET_DISTANCE = 0.9
 local PLACE_OFFSET_DISTANCE = 2
 local LOG_PREFIX = "[QuutDragonBreathSuperLoop]"
 
@@ -41,7 +41,7 @@ local State = {
 	TargetPlot = nil,
 	TargetPlant = nil,
 	TargetPosition = nil,
-	WalkPosition = nil,
+	TweenPosition = nil,
 	SelectedOwnerName = nil,
 	LastStatus = "",
 	ResetToken = 0,
@@ -136,7 +136,7 @@ local function resetLogic(reason)
 	State.TargetPlot = nil
 	State.TargetPlant = nil
 	State.TargetPosition = nil
-	State.WalkPosition = nil
+	State.TweenPosition = nil
 	State.LastStatus = ""
 	State.ResumeAfter = os.clock() + RESPAWN_GRACE_SECONDS
 	State.StandWaitUntil = State.ResumeAfter + RESPAWN_STAND_WAIT_SECONDS
@@ -547,12 +547,12 @@ local function resolveTarget(plot)
 	end
 
 	local nearPosition = projectToPlantArea(plot, plantPosition + (direction * PLACE_OFFSET_DISTANCE)) or placePosition
-	local walkPosition = projectToPlantArea(plot, nearPosition + (direction * WALK_OFFSET_DISTANCE)) or nearPosition
+	local tweenPosition = projectToPlantArea(plot, nearPosition + (direction * TWEEN_OFFSET_DISTANCE)) or nearPosition
 
 	State.TargetPlot = plot
 	State.TargetPlant = plant
 	State.TargetPosition = nearPosition
-	State.WalkPosition = walkPosition
+	State.TweenPosition = tweenPosition
 
 	log(
 		("target ready | plot=%s | plant=%s | place=%.2f, %.2f, %.2f"):format(
@@ -567,8 +567,8 @@ local function resolveTarget(plot)
 	return true
 end
 
-local function getWalkTargetPosition()
-	return State.WalkPosition or State.TargetPosition
+local function getTweenTargetPosition()
+	return State.TweenPosition or State.TargetPosition
 end
 
 local function horizontalDistance(a, b)
@@ -580,15 +580,15 @@ local function horizontalDistance(a, b)
 end
 
 local function isNearTarget(root)
-	local target = getWalkTargetPosition()
-	return root and target and horizontalDistance(root.Position, target) <= WALK_REACHED_DISTANCE
+	local target = getTweenTargetPosition()
+	return root and target and horizontalDistance(root.Position, target) <= TWEEN_REACHED_DISTANCE
 end
 
-local function walkToTarget()
+local function tweenToTarget()
 	local character = getCharacter(CHARACTER_WAIT_TIMEOUT)
 	local humanoid = getHumanoid(character, CHARACTER_WAIT_TIMEOUT)
 	local root = getRootPart(character, CHARACTER_WAIT_TIMEOUT)
-	local target = getWalkTargetPosition()
+	local target = getTweenTargetPosition()
 
 	if not (humanoid and root and target) then
 		return false, "character not ready"
@@ -606,58 +606,48 @@ local function walkToTarget()
 
 	local distance = horizontalDistance(root.Position, target)
 	local speed = math.max(tonumber(humanoid.WalkSpeed) or 16, 1)
-	local timeout = math.clamp((distance / speed) + 5, 3, WALK_MAX_SECONDS_PER_MOVE)
+	local duration = math.clamp(distance / speed, 0.05, TWEEN_MAX_SECONDS_PER_MOVE)
+	local timeout = duration + 0.5
 	local startedAt = os.clock()
-	local nextMoveAt = 0
-	local moveFinished = false
-	local moveReached = false
-	local moveConnection
+	local heightOffset = math.max(3, tonumber(humanoid.HipHeight) or 0)
+	if root then
+		heightOffset = math.max(heightOffset, (root.Size.Y * 0.5) + 1)
+	end
+	local rootTarget = Vector3.new(target.X, target.Y + heightOffset, target.Z)
+	local lookVector = root.CFrame.LookVector
+	local flatLookVector = Vector3.new(lookVector.X, 0, lookVector.Z)
+	if flatLookVector.Magnitude < 0.05 then
+		flatLookVector = Vector3.new(0, 0, -1)
+	end
+	local tween = TweenService:Create(
+		root,
+		TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut),
+		{ CFrame = CFrame.new(rootTarget, rootTarget + flatLookVector.Unit) }
+	)
 
 	pcall(function()
 		humanoid.AutoRotate = true
 	end)
 
-	moveConnection = humanoid.MoveToFinished:Connect(function(reached)
-		moveFinished = true
-		moveReached = reached == true
-	end)
-
-	local function cleanup()
-		if moveConnection then
-			moveConnection:Disconnect()
-			moveConnection = nil
-		end
-	end
+	tween:Play()
 
 	while State.Running and token == State.ResetToken and os.clock() - startedAt <= timeout do
 		if humanoid.Health <= 0 then
-			cleanup()
+			tween:Cancel()
 			resetLogic("health zero")
 			return false, "character dead"
 		end
 
 		if isNearTarget(root) then
-			cleanup()
+			tween:Cancel()
 			return true
-		end
-
-		if moveFinished and moveReached and isNearTarget(root) then
-			cleanup()
-			return true
-		end
-
-		if os.clock() >= nextMoveAt then
-			moveFinished = false
-			moveReached = false
-			humanoid:MoveTo(target)
-			nextMoveAt = os.clock() + WALK_REFRESH_SECONDS
 		end
 
 		task.wait(0.05)
 	end
 
-	cleanup()
-	return isNearTarget(root), "walk timeout"
+	tween:Cancel()
+	return isNearTarget(root), "tween timeout"
 end
 
 local function sprinklersFolder(plot)
@@ -721,9 +711,9 @@ local function ensureSprinkler(plot)
 		return true
 	end
 
-	local walked, walkMessage = walkToTarget()
-	if not walked then
-		return false, walkMessage
+	local tweened, tweenMessage = tweenToTarget()
+	if not tweened then
+		return false, tweenMessage
 	end
 
 	return placeSprinkler(plot)
@@ -782,9 +772,9 @@ local function waitWithSprinklerMaintenance(plot, seconds)
 		local humanoid = getHumanoid(character, 0)
 		local root = getRootPart(character, 0)
 		if humanoid and root and humanoid.Health > 0 and not isNearTarget(root) then
-			local walked, message = walkToTarget()
-			if not walked then
-				setStatus(message or "walk failed")
+			local tweened, message = tweenToTarget()
+			if not tweened then
+				setStatus(message or "tween failed")
 			end
 		elseif humanoid and humanoid.Health <= 0 then
 			resetLogic("health zero")
@@ -861,9 +851,9 @@ task.spawn(function()
 			continue
 		end
 
-		local walked, walkMessage = walkToTarget()
-		if not walked then
-			setStatus(walkMessage or "walk failed")
+		local tweened, tweenMessage = tweenToTarget()
+		if not tweened then
+			setStatus(tweenMessage or "tween failed")
 			task.wait(2)
 			continue
 		end
